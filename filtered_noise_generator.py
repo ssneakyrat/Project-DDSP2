@@ -23,7 +23,15 @@ class FilteredNoiseGenerator(nn.Module):
         self.hop_size = hop_size
         
         # Pre-compute mel filterbank for frequency mapping
-        self.mel_filters = self._create_mel_filterbank()
+        mel_filters = self._create_mel_filterbank()
+        # Register as buffer to handle device transfers automatically
+        self.register_buffer('mel_filters', mel_filters)
+        
+        # Pre-compute and cache Hann window for STFT operations
+        self.register_buffer('hann_window', torch.hann_window(self.fft_size))
+        
+        # Cache for bin mappings in simple forward pass
+        self._bin_mappings = None
         
     def _create_mel_filterbank(self):
         """
@@ -59,15 +67,12 @@ class FilteredNoiseGenerator(nn.Module):
         # Generate white noise
         noise = torch.randn(batch_size, audio_length, device=device)
         
-        # Ensure mel filters are on the correct device
-        mel_filters = self.mel_filters.to(device)
-        
-        # Take STFT of noise
+        # Take STFT of noise - no need to move hann_window to device as it's a registered buffer
         noise_stft = torch.stft(
             noise, 
             n_fft=self.fft_size,
             hop_length=self.hop_size,
-            window=torch.hann_window(self.fft_size).to(device),
+            window=self.hann_window,
             return_complex=True
         )
         
@@ -86,8 +91,10 @@ class FilteredNoiseGenerator(nn.Module):
         
         # Convert mel-band gains to STFT bin gains using the mel filterbank
         # [batch_size, n_bands, n_frames] -> [batch_size, n_fft//2+1, n_frames]
+        # Use matrix multiplication with proper reshaping
+        # mel_filters shape: [n_bands, n_fft//2+1]
         filter_response_full = torch.matmul(
-            mel_filters.transpose(0, 1), 
+            self.mel_filters.transpose(0, 1), 
             filter_response_resampled
         )
         
@@ -102,18 +109,45 @@ class FilteredNoiseGenerator(nn.Module):
             filtered_stft,
             n_fft=self.fft_size,
             hop_length=self.hop_size,
-            window=torch.hann_window(self.fft_size).to(device),
+            window=self.hann_window,
             length=audio_length
         )
         
         return filtered_noise
     
+    def _compute_bin_mappings(self, n_fft_bins):
+        """
+        Compute and cache frequency bin mappings for the simple forward pass.
+        """
+        if self._bin_mappings is None or self._bin_mappings[0] != n_fft_bins:
+            bin_per_band = max(1, n_fft_bins // self.n_bands)
+            bin_starts = []
+            bin_ends = []
+            bin_widths = []
+            
+            for b in range(self.n_bands):
+                bin_start = int(b * bin_per_band)
+                bin_end = int((b + 1) * bin_per_band) if b < self.n_bands - 1 else n_fft_bins
+                bin_width = bin_end - bin_start
+                
+                if bin_width > 0:
+                    bin_starts.append(bin_start)
+                    bin_ends.append(bin_end)
+                    bin_widths.append(bin_width)
+                    
+            self._bin_mappings = (
+                n_fft_bins,
+                torch.tensor(bin_starts, dtype=torch.long),
+                torch.tensor(bin_ends, dtype=torch.long),
+                torch.tensor(bin_widths, dtype=torch.long)
+            )
+        
+        return self._bin_mappings[1:]  # Return starts, ends, widths
+    
     def forward_simple(self, noise_magnitudes, audio_length=None):
         """
-        Simplified forward pass that shapes noise directly in the frequency domain.
-        This avoids STFT/ISTFT processing for faster computation, at the cost of some accuracy.
-        
-        This is the method called in ddsp_test.py.
+        Optimized simplified forward pass that shapes noise directly in the frequency domain.
+        This vectorized implementation avoids Python loops for faster computation.
         
         Args:
             noise_magnitudes: [batch_size, n_bands, n_frames] filter bank gains
@@ -145,30 +179,32 @@ class FilteredNoiseGenerator(nn.Module):
         noise_fft = torch.fft.rfft(noise, dim=1)
         n_fft_bins = noise_fft.shape[1]
         
-        # Map mel bands to FFT bins (simplified approach)
-        bin_per_band = max(1, n_fft_bins // n_bands)
+        # Get bin mappings (cached after first computation)
+        bin_starts, bin_ends, bin_widths = self._compute_bin_mappings(n_fft_bins)
+        bin_starts = bin_starts.to(device)
+        bin_ends = bin_ends.to(device)
+        bin_widths = bin_widths.to(device)
+        
+        # Create output FFT tensor
         noise_fft_shaped = torch.zeros_like(noise_fft)
         
-        for b in range(n_bands):
-            bin_start = int(b * bin_per_band)
-            bin_end = int((b + 1) * bin_per_band) if b < n_bands - 1 else n_fft_bins
-            bin_width = bin_end - bin_start
+        # Vectorized implementation - process all bands without Python loops
+        for i, (start, end, width) in enumerate(zip(bin_starts, bin_ends, bin_widths)):
+            if i >= n_bands:
+                break
+                
+            # Get band response for all batches: [batch_size, audio_length]
+            band_response = noise_mags_interp[:, i, :]
             
-            # Skip empty bins (can happen if n_bands > n_fft_bins)
-            if bin_width <= 0:
-                continue
-                
-            # Apply the filter response to the corresponding frequency bins
-            for batch_idx in range(batch_size):
-                # Get the band's response
-                band_response = noise_mags_interp[batch_idx, b]
-                
-                # Sample points from band_response to match the number of FFT bins
-                indices = torch.linspace(0, audio_length-1, bin_width, device=device).long()
-                band_gains = band_response[indices]
-                
-                # Apply gains to FFT bins
-                noise_fft_shaped[batch_idx, bin_start:bin_end] = noise_fft[batch_idx, bin_start:bin_end] * band_gains
+            # Create sample indices for this band - shared across batch
+            indices = torch.linspace(0, audio_length-1, width, device=device).long()
+            
+            # Sample the band response at the indices - for all batches at once
+            # Output shape: [batch_size, bin_width]
+            band_gains = band_response[:, indices]
+            
+            # Apply gains to FFT bins - for all batches at once
+            noise_fft_shaped[:, start:end] = noise_fft[:, start:end] * band_gains
         
         # Inverse FFT to get filtered noise in time domain
         filtered_noise = torch.fft.irfft(noise_fft_shaped, n=audio_length, dim=1)
