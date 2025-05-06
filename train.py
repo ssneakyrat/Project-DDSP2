@@ -337,9 +337,13 @@ def main():
     logger.info("Loading datasets...")
     train_loader, val_loader, train_dataset, val_dataset = get_dataloader(
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=1,
         pin_memory=True,
-        device=args.device
+        device=args.device,
+        persistent_workers=True,
+        train_files=100,
+        val_files=10,
+        context_window_sec=2
     )
     
     # Get vocabulary sizes

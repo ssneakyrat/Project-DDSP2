@@ -1,0 +1,66 @@
+=== SINGING VOICE VAL DISTRIBUTION ===
+
+Total segments: 40
+Total singers: 1
+Total languages: 1
+Total unique phones: 56
+
+Max audio length: 32000 samples (2.00 seconds)
+Max mel frames: 126
+
+=== SINGER STATISTICS ===
+Singer miki (ID: 0):
+  - Files: 9
+  - Total duration: 72.18 seconds
+  - Languages: en
+
+=== LANGUAGE STATISTICS ===
+Language en (ID: 0):
+  - Files: 9
+  - Singers: 1
+  - Total duration: 72.18 seconds
+  - Phone distribution:
+    pau: 38
+    ah: 27
+    n: 24
+    s: 18
+    l: 17
+    iy: 16
+    ay: 15
+    ih: 14
+    t: 14
+    d: 14
+    m: 14
+    w: 13
+    eh: 12
+    ow: 12
+    r: 9
+    z: 9
+    hh: 8
+    y: 8
+    ey: 8
+    uw: 8
+    k: 8
+    p: 7
+    er: 7
+    dh: 7
+    g: 6
+    v: 5
+    dx: 5
+    aw: 4
+    b: 4
+    ae: 4
+    aa: 3
+    th: 3
+    sh: 3
+    uh: 3
+    ch: 3
+    ao: 2
+    ng: 2
+    fry: 1
+    bri: 1
+    jh: 1
+    enb: 1
+    f: 1
+    oy: 1
+

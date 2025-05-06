@@ -1,3 +1,7 @@
 ddsp_test_output/
 *.wav
 *.pyc
+datasets/
+*.log
+*pkl
+output/
